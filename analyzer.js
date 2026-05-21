@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+﻿import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -77,9 +77,17 @@ ${html}
     const data = await response.json();
     const text = data.choices?.[0]?.message?.content || "";
 
-    // Strip markdown code fences if present
-    const clean = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean);
+    // Strip <think>...</think> blocks (Qwen chain-of-thought) and markdown fences
+    const clean = text
+      .replace(/<think>[\s\S]*?<\/think>/g, "")
+      .replace(/```json|```/g, "")
+      .trim();
+    const jsonMatch = clean.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error(`No JSON found in AI response for ${businessName}. Raw: ${text.slice(0, 200)}`);
+      return null;
+    }
+    return JSON.parse(jsonMatch[0]);
   } catch (err) {
     console.error(`AI analysis failed for ${businessName}:`, err.message);
     return null;
@@ -92,7 +100,7 @@ async function runAnalyzer() {
   const { data: leads, error } = await supabase
     .from("leads")
     .select("id, business_name, website")
-    .eq("audit_status", "pending")
+    .in("audit_status", ["pending", "processing"])
     .not("website", "is", null)
     .limit(20); // Process 20 at a time
 
