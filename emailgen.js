@@ -13,6 +13,22 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const MAX_ATTEMPTS = 3;
 
+// The SDK already retries a 429 twice, honouring retry-after. Groq's
+// per-minute token limit can outlast that (e.g. straight after the analyzer
+// has run), so wait out a full window once more before giving up.
+const RATE_LIMIT_WAIT_MS = 60_000;
+
+async function createCompletion(params) {
+  try {
+    return await groq.chat.completions.create(params);
+  } catch (err) {
+    if (err?.status !== 429) throw err;
+    console.warn(`  Groq rate limit — waiting ${RATE_LIMIT_WAIT_MS / 1000}s before one more try`);
+    await new Promise((r) => setTimeout(r, RATE_LIMIT_WAIT_MS));
+    return groq.chat.completions.create(params);
+  }
+}
+
 // Model output and scraped fields are built from prospects' websites, so they
 // are untrusted and escaped before going into the HTML.
 const esc = (s) =>
@@ -225,14 +241,28 @@ Return ONLY a valid JSON object with NO markdown, NO code fences, NO extra text:
 
 Rules: casual and human, not salesy. Use \\n if needed inside strings — no literal newlines.`;
 
-  const response = await groq.chat.completions.create({
+  // gpt-oss is a reasoning model: hidden reasoning tokens count against
+  // max_tokens, and when they use it all up the answer comes back empty.
+  // Low effort is plenty for filling a template; the larger budget covers
+  // whatever reasoning it still does.
+  const response = await createCompletion({
     model: "openai/gpt-oss-20b",
-    max_tokens: 1024,
+    max_tokens: 4096,
+    reasoning_effort: "low",
     temperature: 0.7,
     messages: [{ role: "user", content: prompt }],
   });
 
-  const text = response.choices[0]?.message?.content || null;
+  const choice = response.choices[0];
+  const text = choice?.message?.content || null;
+
+  if (!text) {
+    throw new Error(
+      `Empty Groq response (finish_reason: ${choice?.finish_reason ?? "unknown"}, ` +
+        `completion_tokens: ${response.usage?.completion_tokens ?? "?"})`,
+    );
+  }
+
   const content = extractJSON(text);
 
   if (

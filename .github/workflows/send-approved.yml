@@ -24,7 +24,9 @@ concurrency:
 
 jobs:
   send:
-    runs-on: ubuntu-latest
+    # Pinned so the runner OS changes when we choose, not when GitHub moves
+    # ubuntu-latest (to Ubuntu 26 from 2026-10-19)
+    runs-on: ubuntu-24.04
     # Secrets live in the Production environment, limited to the main branch
     environment: Production
     timeout-minutes: 15
