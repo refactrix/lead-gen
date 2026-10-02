@@ -1,0 +1,50 @@
+# Audits new leads and drafts emails for the high-scoring ones.
+# Writes to the database only; nothing is emailed from this workflow.
+name: Process leads
+
+on:
+  schedule:
+    # Every 4 hours, at :17 to avoid the top-of-hour queue. Times are UTC.
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two copies at once; a new run waits for the current one.
+concurrency:
+  group: process-leads
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    # Secrets live in the Production environment, limited to the main branch
+    environment: Production
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      CALENDAR_LINK: ${{ vars.CALENDAR_LINK }}
+      # No browser is needed for these stages
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Audit websites
+        run: node analyzer.js
+        timeout-minutes: 15
+
+      - name: Draft emails
+        # Still drafts for leads audited on earlier runs if the audit step failed
+        if: ${{ !cancelled() }}
+        run: node emailgen.js
+        timeout-minutes: 15

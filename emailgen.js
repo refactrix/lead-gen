@@ -1,3 +1,4 @@
+import "./redact-logs.js";
 import { createClient } from "@supabase/supabase-js";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
@@ -9,6 +10,18 @@ const supabase = createClient(
 );
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+const MAX_ATTEMPTS = 3;
+
+// Model output and scraped fields are built from prospects' websites, so they
+// are untrusted and escaped before going into the HTML.
+const esc = (s) =>
+  String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 
 // ─── HTML template ───────────────────────────────────────────────────────────
 function buildHtml({
@@ -35,8 +48,8 @@ function buildHtml({
           <div style="width:34px;height:34px;background:${ICON_COLORS[i]};border-radius:10px;text-align:center;line-height:34px;font-size:17px;">${ICONS[i]}</div>
         </td>
         <td style="padding-left:14px;" valign="top">
-          <p style="margin:0 0 3px 0;font-size:14px;font-weight:600;color:#18181b;">${issue.title}</p>
-          <p style="margin:0;font-size:13px;color:#52525b;line-height:1.6;">${issue.detail}</p>
+          <p style="margin:0 0 3px 0;font-size:14px;font-weight:600;color:#18181b;">${esc(issue.title)}</p>
+          <p style="margin:0;font-size:13px;color:#52525b;line-height:1.6;">${esc(issue.detail)}</p>
         </td>
       </tr>
     </table>`,
@@ -86,18 +99,18 @@ function buildHtml({
                 <tr>
                   <td style="padding:40px 44px 36px 44px;">
 
-                    <p style="margin:0 0 8px 0;font-size:15px;font-weight:600;color:#18181b;">Hi ${businessName},</p>
+                    <p style="margin:0 0 8px 0;font-size:15px;font-weight:600;color:#18181b;">Hi ${esc(businessName)},</p>
 
-                    <p style="margin:0 0 32px 0;font-size:15px;color:#52525b;line-height:1.75;">${opening}</p>
+                    <p style="margin:0 0 32px 0;font-size:15px;color:#52525b;line-height:1.75;">${esc(opening)}</p>
 
-                    <p style="margin:0 0 14px 0;font-size:11px;font-weight:600;color:#6366f1;letter-spacing:1.2px;text-transform:uppercase;">What we found on ${domain}</p>
+                    <p style="margin:0 0 14px 0;font-size:11px;font-weight:600;color:#6366f1;letter-spacing:1.2px;text-transform:uppercase;">What we found on ${esc(domain)}</p>
                     <div style="background:#e8e8ed;height:1px;margin:0 0 20px 0;"></div>
 
                     ${issueRows}
 
                     <div style="background:#e8e8ed;height:1px;margin:0 0 28px 0;"></div>
 
-                    <p style="margin:0 0 28px 0;font-size:15px;color:#52525b;line-height:1.75;">${closing}</p>
+                    <p style="margin:0 0 28px 0;font-size:15px;color:#52525b;line-height:1.75;">${esc(closing)}</p>
 
                     <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:36px;">
                       <tr>
@@ -138,7 +151,7 @@ function buildHtml({
               <p style="margin:0;font-size:11px;color:#a1a1aa;text-align:center;line-height:1.8;">
                 Refactrix &nbsp;·&nbsp; refactrix.com<br />
                 You're receiving this because we think we can genuinely help.&nbsp;
-                <a href="mailto:mohit.j@refactrix.com?subject=Unsubscribe" style="color:#a1a1aa;text-decoration:underline;">Unsubscribe</a>
+                <a href="{{UNSUBSCRIBE_URL}}" style="color:#a1a1aa;text-decoration:underline;">Unsubscribe</a>
               </p>
             </td>
           </tr>
@@ -176,6 +189,8 @@ async function generateEmailContent(lead) {
   const perfIssues = audit.performance_issues || [];
   const seoIssues = audit.seo_issues || [];
   const accessIssues = audit.accessibility_issues || [];
+  // Set by analyzer.js from the page HTML itself (older audits don't have it)
+  const measured = audit.measured_issues || [];
 
   const prompt = `You are writing content for a cold outreach HTML email from Mohit Jeswani, Founder of Refactrix — a software engineering studio helping UK businesses improve their websites.
 
@@ -183,11 +198,20 @@ Business: ${lead.business_name}
 Website: ${lead.website}
 Domain: ${lead.domain || lead.website}
 
-Audit findings:
+Measured issues (confirmed by checking the page's HTML):
+${measured.map((m) => `- ${m}`).join("\n") || "- none"}
+
+Other observations (NOT verified — a model read only the page's visible text):
 - Performance: ${perfIssues.join(", ") || "none"}
 - SEO: ${seoIssues.join(", ") || "none"}
 - Accessibility: ${accessIssues.join(", ") || "none"}
 - Top improvements: ${improvements.join(", ") || "none"}
+
+Accuracy rules (these override everything else):
+- Base issue1, issue2 and issue3 on the measured issues first.
+- Anything taken from the other observations must use cautious wording such as "may" or "appears", never stated as fact.
+- Never state load times, file sizes, scores, percentages or any other number.
+- Never claim the site is slow or that images are too large — nothing measured page speed.
 
 Return ONLY a valid JSON object with NO markdown, NO code fences, NO extra text:
 {
@@ -211,7 +235,13 @@ Rules: casual and human, not salesy. Use \\n if needed inside strings — no lit
   const text = response.choices[0]?.message?.content || null;
   const content = extractJSON(text);
 
-  if (!content?.subject || !content?.opening || !content?.issue1) {
+  if (
+    !content?.subject ||
+    !content?.opening ||
+    !content?.issue1 ||
+    !content?.issue2 ||
+    !content?.issue3
+  ) {
     throw new Error(`Malformed Groq response: ${text?.slice(0, 300)}`);
   }
 
@@ -235,29 +265,38 @@ async function runEmailGen() {
   let totalGenerated = 0;
   let totalFailed = 0;
 
+  // Each lead is tried at most once per run, so a lead that keeps failing
+  // cannot keep the loop alive.
+  const seen = new Set();
+
   while (true) {
-    const { data: leads, error } = await supabase
+    const { data: batch, error } = await supabase
       .from("leads")
       .select("*")
       .eq("audit_status", "done")
       .or(
         "email_status.eq.pending,email_status.is.null,email_status.eq.processing",
       )
+      .lt("email_attempts", MAX_ATTEMPTS)
       .not("email", "is", null)
       .gte("opportunity_score", 6)
       .limit(10);
 
     if (error) {
       console.error("Supabase error:", error.message);
+      process.exitCode = 1;
       break;
     }
 
-    if (!leads || leads.length === 0) {
+    const leads = (batch || []).filter((l) => !seen.has(l.id));
+
+    if (leads.length === 0) {
       console.log("No more eligible leads.");
       break;
     }
 
     for (const lead of leads) {
+      seen.add(lead.id);
       console.log(`\nProcessing: ${lead.business_name} → ${lead.email}`);
 
       await supabase
@@ -299,12 +338,16 @@ async function runEmailGen() {
         console.log(`  ✓ Ready: "${content.subject}"`);
         totalGenerated++;
       } catch (err) {
+        const attempts = (lead.email_attempts ?? 0) + 1;
         await supabase
           .from("leads")
-          .update({ email_status: "pending" })
+          .update({
+            email_attempts: attempts,
+            email_status: attempts >= MAX_ATTEMPTS ? "failed" : "pending",
+          })
           .eq("id", lead.id);
 
-        console.error(`  ✗ Failed: ${err.message}`);
+        console.error(`  ✗ Failed (attempt ${attempts}/${MAX_ATTEMPTS}): ${err.message}`);
         totalFailed++;
       }
 
@@ -316,7 +359,7 @@ async function runEmailGen() {
   console.log(`  Ready:  ${totalGenerated}`);
   console.log(`  Failed: ${totalFailed}`);
   console.log(
-    `\nReview leads in Supabase, set email_status = 'approved', then run: node sendapproved.js`,
+    `\nReview drafts in the admin, set email_status = 'approved', then run: node sendapproved.js`,
   );
 }
 

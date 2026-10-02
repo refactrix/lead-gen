@@ -1,4 +1,5 @@
-﻿import { createClient } from "@supabase/supabase-js";
+﻿import "./redact-logs.js";
+import { createClient } from "@supabase/supabase-js";
 import * as cheerio from "cheerio";
 import dotenv from "dotenv";
 dotenv.config();
@@ -10,6 +11,42 @@ const supabase = createClient(
 );
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+const MAX_ATTEMPTS = 3;
+
+// Facts read straight from the HTML, so the email can state them as findings.
+// Wording carries no numbers, because the email must not quote any.
+function measureHtml($, finalUrl, bodyText) {
+  const checks = {
+    https: finalUrl.startsWith("https://"),
+    has_title: $("head title").first().text().trim().length > 0,
+    has_meta_description: $("meta")
+      .filter((_, el) => ($(el).attr("name") || "").toLowerCase() === "description")
+      .toArray()
+      .some((el) => ($(el).attr("content") || "").trim().length > 0),
+    has_viewport: $("meta")
+      .toArray()
+      .some((el) => ($(el).attr("name") || "").toLowerCase() === "viewport"),
+    has_lang: ($("html").attr("lang") || "").trim().length > 0,
+    h1_count: $("h1").length,
+    images: $("img").length,
+    images_missing_alt: $("img:not([alt])").length,
+    // Pages rendered by JavaScript arrive nearly empty, so heading and image
+    // checks would report false problems; they only count when text came back.
+    server_rendered: bodyText.length >= 200,
+  };
+
+  const issues = [];
+  if (!checks.https) issues.push("The site does not load over HTTPS, so browsers may mark it as not secure");
+  if (!checks.has_title) issues.push("The homepage has no page title");
+  if (!checks.has_meta_description) issues.push("The homepage has no meta description, so search engines choose their own snippet");
+  if (!checks.has_viewport) issues.push("There is no mobile viewport tag, so the page may not scale properly on phones");
+  if (!checks.has_lang) issues.push("The page does not declare its language, which screen readers use");
+  if (checks.server_rendered && checks.h1_count === 0) issues.push("The homepage has no main heading (H1)");
+  if (checks.server_rendered && checks.images_missing_alt > 0) issues.push("Some images have no alt text, which screen readers and search engines rely on");
+
+  return { checks, issues };
+}
 
 async function fetchWebsiteHTML(url) {
   try {
@@ -33,19 +70,29 @@ async function fetchWebsiteHTML(url) {
     const html = await response.text();
     console.log(`  Fetched ${html.length} chars`);
     const $ = cheerio.load(html);
-    $("script, style, svg, img").remove(); // strip noise
-    const text = $("body").text().replace(/\s+/g, " ").trim();
-    return text.slice(0, 4000); // clean text is far more token-efficient
+
+    // Visible text, used for both the render check and the model prompt
+    const $text = cheerio.load(html);
+    $text("script, style, svg, img").remove(); // strip noise
+    const text = $text("body").text().replace(/\s+/g, " ").trim();
+
+    const measured = measureHtml($, response.url || cleanUrl, text);
+    return { text: text.slice(0, 4000), measured }; // clean text is far more token-efficient
   } catch (err) {
     console.error(`  Fetch failed: ${err.message}`);
     return null;
   }
 }
 
-async function analyzeWebsite(html, businessName, website) {
+async function analyzeWebsite(html, measuredIssues, businessName, website) {
   const systemPrompt = `You are a web consultant. You must respond with ONLY a valid JSON object — no explanation, no markdown, no code fences, no extra text. Just the raw JSON.`;
 
-  const userPrompt = `Analyze this website HTML for "${businessName}" (${website}) and return a JSON object with this exact structure:
+  const userPrompt = `Analyze this website text for "${businessName}" (${website}). You only have the visible text: you cannot see images, styling or load speed, so do not report on them.
+
+Issues already confirmed from the page's HTML:
+${measuredIssues.map((m) => `- ${m}`).join("\n") || "- none"}
+
+Return a JSON object with this exact structure:
 {
   "performance_issues": ["issue1", "issue2"],
   "accessibility_issues": ["issue1", "issue2"],
@@ -56,7 +103,7 @@ async function analyzeWebsite(html, businessName, website) {
   "opportunity_score": <integer 1-10, where 10 means most room for improvement>
 }
 
-HTML:
+Page text:
 ${html}`;
 
   try {
@@ -96,13 +143,15 @@ async function runAnalyzer() {
 
   const { data: leads, error } = await supabase
     .from("leads")
-    .select("id, business_name, website")
+    .select("id, business_name, website, audit_attempts")
     .in("audit_status", ["pending", "processing", "failed"])
+    .lt("audit_attempts", MAX_ATTEMPTS)
     .not("website", "is", null)
     .limit(20);
 
   if (error) {
     console.error("Error fetching leads:", error.message);
+    process.exitCode = 1;
     return;
   }
 
@@ -117,30 +166,43 @@ async function runAnalyzer() {
       .update({ audit_status: "processing" })
       .eq("id", lead.id);
 
-    const html = await fetchWebsiteHTML(lead.website);
-
-    if (!html) {
-      await supabase
+    // Failed rows are retried on later runs until MAX_ATTEMPTS is reached
+    const markFailed = () =>
+      supabase
         .from("leads")
-        .update({ audit_status: "failed" })
+        .update({
+          audit_status: "failed",
+          audit_attempts: (lead.audit_attempts ?? 0) + 1,
+        })
         .eq("id", lead.id);
+
+    const page = await fetchWebsiteHTML(lead.website);
+
+    if (!page) {
+      await markFailed();
       continue;
     }
 
-    const audit = await analyzeWebsite(html, lead.business_name, lead.website);
+    const audit = await analyzeWebsite(
+      page.text,
+      page.measured.issues,
+      lead.business_name,
+      lead.website,
+    );
 
     if (!audit) {
-      await supabase
-        .from("leads")
-        .update({ audit_status: "failed" })
-        .eq("id", lead.id);
+      await markFailed();
       continue;
     }
 
     const { error: updateError } = await supabase
       .from("leads")
       .update({
-        audit,
+        audit: {
+          ...audit,
+          measured_issues: page.measured.issues,
+          checks: page.measured.checks,
+        },
         opportunity_score: audit.opportunity_score,
         audit_status: "done",
       })

@@ -1,0 +1,51 @@
+# Sends emails that were approved in the admin. This is the only workflow
+# that reaches the outside world.
+name: Send approved emails
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_limit:
+        description: "Maximum emails to send in this run (1–50)"
+        required: true
+        default: "5"
+  # Turn on only after the unsubscribe route is live and a test send has
+  # passed. Weekdays at 09:05–15:05 UTC, which stays inside UK business hours
+  # in both GMT and BST. 7 runs × SEND_BATCH_LIMIT (default 5) = 35 a day.
+  # schedule:
+  #   - cron: "5 9-15 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: send-approved
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    # Secrets live in the Production environment, limited to the main branch
+    environment: Production
+    timeout-minutes: 15
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      HOSTINGER_EMAIL: ${{ secrets.HOSTINGER_EMAIL }}
+      HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+      UNSUBSCRIBE_SECRET: ${{ secrets.UNSUBSCRIBE_SECRET }}
+      # Manual runs use the input; scheduled runs use the repo variable
+      SEND_BATCH_LIMIT: ${{ inputs.batch_limit || vars.SEND_BATCH_LIMIT || '5' }}
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Send approved emails
+        run: node sendapproved.js
