@@ -8,6 +8,90 @@ const supabase = createClient(
   process.env.SUPABASE_KEY,
 );
 
+// ─── Email extraction helpers (lightweight version for scraper) ───────────────
+
+const EMAIL_REGEX = /\b[a-zA-Z0-9._%+\-]{1,64}@[a-zA-Z0-9.\-]{1,255}\.[a-zA-Z]{2,10}\b/g;
+
+const IGNORED_EMAIL_DOMAINS = new Set([
+  "sentry.io", "wixpress.com", "squarespace.com", "shopify.com",
+  "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+  "google.com", "facebook.com", "twitter.com", "youtube.com",
+  "example.com", "wordpress.com", "cloudflare.com", "amazonaws.com",
+  "w3.org", "schema.org", "apple.com", "microsoft.com",
+]);
+
+const PRIORITY_PATHS = [
+  "/contact", "/contact-us", "/contacts", "/get-in-touch",
+  "/about", "/about-us", "/reach-us", "/help",
+];
+
+const PREFERRED_PREFIXES = new Set([
+  "info", "contact", "hello", "enquiries", "enquiry",
+  "admin", "sales", "support", "mail", "office", "team",
+]);
+
+function extractEmails(text) {
+  const matches = text.match(EMAIL_REGEX) || [];
+  return matches.filter((e) => !IGNORED_EMAIL_DOMAINS.has(e.split("@")[1]?.toLowerCase()));
+}
+
+function rankEmails(emails, domain) {
+  const scored = emails.map((email) => {
+    const [local, emailDomain] = email.toLowerCase().split("@");
+    let score = 0;
+    if (emailDomain === domain) score += 20;
+    else if (domain.includes(emailDomain) || emailDomain.includes(domain.split(".")[0])) score += 10;
+    if (PREFERRED_PREFIXES.has(local)) score += 3;
+    else score += 1;
+    return { email, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored;
+}
+
+async function findEmailForSite(emailPage, website, domain) {
+  const visited = new Set();
+  const emailSet = new Set();
+
+  try {
+    await emailPage.goto(website, { waitUntil: "domcontentloaded", timeout: 12000 });
+    const homeText = await emailPage.content().catch(() => "");
+    extractEmails(homeText).forEach((e) => emailSet.add(e));
+    visited.add(website);
+
+    // Check for early strong match
+    const homeRanked = rankEmails([...emailSet], domain);
+    if (homeRanked.length && homeRanked[0].score >= 20) {
+      return homeRanked[0].email;
+    }
+
+    // Crawl priority pages
+    const base = new URL(website).origin;
+    for (const path of PRIORITY_PATHS) {
+      const pageUrl = base + path;
+      if (visited.has(pageUrl)) continue;
+      visited.add(pageUrl);
+
+      try {
+        const resp = await emailPage.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 8000 });
+        if (!resp || !resp.ok()) continue;
+        const text = await emailPage.content().catch(() => "");
+        extractEmails(text).forEach((e) => emailSet.add(e));
+      } catch {
+        // page not found — skip
+      }
+
+      const ranked = rankEmails([...emailSet], domain);
+      if (ranked.length && ranked[0].score >= 20) return ranked[0].email;
+    }
+  } catch {
+    // site unreachable
+  }
+
+  const ranked = rankEmails([...emailSet], domain);
+  return ranked.length ? ranked[0].email : null;
+}
+
 const SEARCH_QUERIES = [
   "restaurant London UK",
   "cafe Manchester UK",
@@ -70,6 +154,15 @@ async function scrapeLeads() {
   console.log("Launching browser...");
   const browser = await chromium.launch({ headless: false });
   const page = await browser.newPage();
+  const emailPage = await browser.newPage();
+
+  // Block images/fonts on the email crawl page to speed it up
+  await emailPage.route("**/*", (route) => {
+    const type = route.request().resourceType();
+    if (["image", "font", "media", "stylesheet"].includes(type)) route.abort();
+    else route.continue();
+  });
+
   console.log("Browser launched");
 
   const { urlSet: existingUrls, domainSet: existingDomains } =
@@ -153,6 +246,11 @@ async function scrapeLeads() {
 
       console.log(`New lead: ${place.name} | ${domain}`);
 
+      // Find email by crawling the business website
+      const email = await findEmailForSite(emailPage, website.trim(), domain);
+      if (email) console.log(`  → Email found: ${email}`);
+      else console.log(`  → No email found`);
+
       newLeads.push({
         business_name: place.name.trim(),
         website: website.trim(),
@@ -162,6 +260,7 @@ async function scrapeLeads() {
         category: query,
         google_maps_url: place.href,
         google_maps_url_normalized: normalizedMapUrl,
+        email: email || null,
       });
 
       // Mark as seen in memory

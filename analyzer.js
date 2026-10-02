@@ -1,13 +1,15 @@
 ﻿import { createClient } from "@supabase/supabase-js";
+import * as cheerio from "cheerio";
 import dotenv from "dotenv";
 dotenv.config();
+import Groq from "groq-sdk";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY,
 );
 
-const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 async function fetchWebsiteHTML(url) {
   try {
@@ -30,7 +32,10 @@ async function fetchWebsiteHTML(url) {
 
     const html = await response.text();
     console.log(`  Fetched ${html.length} chars`);
-    return html.slice(0, 15000);
+    const $ = cheerio.load(html);
+    $("script, style, svg, img").remove(); // strip noise
+    const text = $("body").text().replace(/\s+/g, " ").trim();
+    return text.slice(0, 4000); // clean text is far more token-efficient
   } catch (err) {
     console.error(`  Fetch failed: ${err.message}`);
     return null;
@@ -38,10 +43,9 @@ async function fetchWebsiteHTML(url) {
 }
 
 async function analyzeWebsite(html, businessName, website) {
-  const prompt = `
-You are an expert web consultant. Analyze this website HTML for "${businessName}" (${website}).
+  const systemPrompt = `You are a web consultant. You must respond with ONLY a valid JSON object — no explanation, no markdown, no code fences, no extra text. Just the raw JSON.`;
 
-Return ONLY a valid JSON object with this exact structure, no extra text:
+  const userPrompt = `Analyze this website HTML for "${businessName}" (${website}) and return a JSON object with this exact structure:
 {
   "performance_issues": ["issue1", "issue2"],
   "accessibility_issues": ["issue1", "issue2"],
@@ -53,29 +57,20 @@ Return ONLY a valid JSON object with this exact structure, no extra text:
 }
 
 HTML:
-${html}
-`;
+${html}`;
 
   try {
-    const response = await fetch(
-      "https://integrate.api.nvidia.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${NVIDIA_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "qwen/qwen3.5-397b-a17b",
-          messages: [{ role: "user", content: prompt }],
-          max_tokens: 1000,
-          temperature: 0.3,
-        }),
-      },
-    );
+    const completion = await groq.chat.completions.create({
+      model: "openai/gpt-oss-20b",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      max_tokens: 2000,
+      temperature: 0.3,
+    });
 
-    const data = await response.json();
-    const text = data.choices?.[0]?.message?.content || "";
+    const text = completion.choices?.[0]?.message?.content || "";
 
     // Strip <think>...</think> blocks (Qwen chain-of-thought) and markdown fences
     const clean = text
@@ -84,7 +79,9 @@ ${html}
       .trim();
     const jsonMatch = clean.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      console.error(`No JSON found in AI response for ${businessName}. Raw: ${text.slice(0, 200)}`);
+      console.error(
+        `No JSON found in AI response for ${businessName}. Raw: ${text.slice(0, 200)}`,
+      );
       return null;
     }
     return JSON.parse(jsonMatch[0]);
@@ -100,9 +97,9 @@ async function runAnalyzer() {
   const { data: leads, error } = await supabase
     .from("leads")
     .select("id, business_name, website")
-    .in("audit_status", ["pending", "processing"])
+    .in("audit_status", ["pending", "processing", "failed"])
     .not("website", "is", null)
-    .limit(20); // Process 20 at a time
+    .limit(20);
 
   if (error) {
     console.error("Error fetching leads:", error.message);
@@ -158,7 +155,7 @@ async function runAnalyzer() {
     }
 
     // Small delay to avoid rate limiting
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 4000));
   }
 
   console.log("\nAnalysis complete.");
