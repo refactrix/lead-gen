@@ -30,9 +30,19 @@ const PREFERRED_PREFIXES = new Set([
   "admin", "sales", "support", "mail", "office", "team",
 ]);
 
+// Matches subdomains too, so e.g. sentry-next.wixpress.com is caught by
+// wixpress.com (Wix embeds Sentry addresses like that in every page).
+function isIgnoredDomain(domain = "") {
+  const d = domain.toLowerCase();
+  for (const ignored of IGNORED_EMAIL_DOMAINS) {
+    if (d === ignored || d.endsWith("." + ignored)) return true;
+  }
+  return false;
+}
+
 function extractEmails(text) {
   const matches = text.match(EMAIL_REGEX) || [];
-  return matches.filter((e) => !IGNORED_EMAIL_DOMAINS.has(e.split("@")[1]?.toLowerCase()));
+  return matches.filter((e) => !isIgnoredDomain(e.split("@")[1]));
 }
 
 function rankEmails(emails, domain) {

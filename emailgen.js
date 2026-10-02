@@ -18,6 +18,22 @@ const MAX_ATTEMPTS = 3;
 // has run), so wait out a full window once more before giving up.
 const RATE_LIMIT_WAIT_MS = 60_000;
 
+// ─── Address check ───────────────────────────────────────────────────────────
+// Scraped addresses are often not the business's own: template placeholders
+// (hi@mystore.com), the web agency's inbox, or tracking addresses. Only draft
+// when the email's domain is the website's domain or a subdomain either way.
+// A person can override by setting the lead's email status to "verified".
+
+const hostOf = (s = "") =>
+  s.toLowerCase().trim().replace(/^https?:\/\//, "").split(/[/?#:]/)[0].replace(/^www\./, "");
+
+function emailMatchesSite(email, site) {
+  const e = hostOf(email.split("@")[1]);
+  const s = hostOf(site);
+  if (!e || !s) return false;
+  return e === s || e.endsWith("." + s) || s.endsWith("." + e);
+}
+
 async function createCompletion(params) {
   try {
     return await groq.chat.completions.create(params);
@@ -294,6 +310,7 @@ async function runEmailGen() {
 
   let totalGenerated = 0;
   let totalFailed = 0;
+  let totalSkipped = 0;
 
   // Each lead is tried at most once per run, so a lead that keeps failing
   // cannot keep the loop alive.
@@ -305,7 +322,7 @@ async function runEmailGen() {
       .select("*")
       .eq("audit_status", "done")
       .or(
-        "email_status.eq.pending,email_status.is.null,email_status.eq.processing",
+        "email_status.eq.pending,email_status.is.null,email_status.eq.processing,email_status.eq.verified",
       )
       .lt("email_attempts", MAX_ATTEMPTS)
       .not("email", "is", null)
@@ -328,6 +345,23 @@ async function runEmailGen() {
     for (const lead of leads) {
       seen.add(lead.id);
       console.log(`\nProcessing: ${lead.business_name} → ${lead.email}`);
+
+      const site = lead.domain || lead.website || "";
+      if (lead.email_status !== "verified" && !emailMatchesSite(lead.email, site)) {
+        const note =
+          `[auto] Email domain doesn't match the website (${hostOf(site) || "none"}). ` +
+          `Fix the address, or set email status to Verified to draft anyway.`;
+        await supabase
+          .from("leads")
+          .update({
+            email_status: "failed",
+            notes: lead.notes?.includes("[auto] Email domain") ? lead.notes : [lead.notes, note].filter(Boolean).join("\n"),
+          })
+          .eq("id", lead.id);
+        console.log(`  – Skipped: email domain doesn't match ${hostOf(site) || "website"}`);
+        totalSkipped++;
+        continue;
+      }
 
       await supabase
         .from("leads")
@@ -373,7 +407,13 @@ async function runEmailGen() {
           .from("leads")
           .update({
             email_attempts: attempts,
-            email_status: attempts >= MAX_ATTEMPTS ? "failed" : "pending",
+            // A person-verified address stays verified between retries
+            email_status:
+              attempts >= MAX_ATTEMPTS
+                ? "failed"
+                : lead.email_status === "verified"
+                  ? "verified"
+                  : "pending",
           })
           .eq("id", lead.id);
 
@@ -388,6 +428,7 @@ async function runEmailGen() {
   console.log(`\nSummary:`);
   console.log(`  Ready:  ${totalGenerated}`);
   console.log(`  Failed: ${totalFailed}`);
+  console.log(`  Skipped (address doesn't match website): ${totalSkipped}`);
   console.log(
     `\nReview drafts in the admin, set email_status = 'approved', then run: node sendapproved.js`,
   );
