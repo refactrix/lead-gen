@@ -52,11 +52,13 @@ const transporter = nodemailer.createTransport({
 
 // ─── Unsubscribe link ────────────────────────────────────────────────────────
 // Must match the signing in refactrix/web app/unsubscribe/route.ts.
+// Uses www directly: refactrix.com redirects there, and a one-click
+// unsubscribe POST from a mail provider may not follow the redirect.
 
 function unsubscribeUrl(email) {
   const e = email.trim().toLowerCase();
   const t = crypto.createHmac("sha256", process.env.UNSUBSCRIBE_SECRET).update(e).digest("hex");
-  return `https://refactrix.com/unsubscribe?e=${encodeURIComponent(e)}&t=${t}`;
+  return `https://www.refactrix.com/unsubscribe?e=${encodeURIComponent(e)}&t=${t}`;
 }
 
 // New drafts carry a {{UNSUBSCRIBE_URL}} placeholder. Older drafts have a
