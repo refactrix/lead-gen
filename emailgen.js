@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
 dotenv.config();
+import { SEND_COUNTRIES, SEND_COUNTRY_CODES } from "./countries.js";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -224,7 +225,8 @@ async function generateEmailContent(lead) {
   // Set by analyzer.js from the page HTML itself (older audits don't have it)
   const measured = audit.measured_issues || [];
 
-  const prompt = `You are writing content for a cold outreach HTML email from Mohit Jeswani, Founder of Refactrix — a software engineering studio helping UK businesses improve their websites.
+  const prompt = `You are writing content for a cold outreach HTML email from Mohit Jeswani, Founder of Refactrix — a software engineering studio helping small businesses improve their websites.
+Write in ${(SEND_COUNTRIES[lead.country] ?? SEND_COUNTRIES.GB).language}.
 
 Business: ${lead.business_name}
 Website: ${lead.website}
@@ -326,6 +328,8 @@ async function runEmailGen() {
       )
       .lt("email_attempts", MAX_ATTEMPTS)
       .not("email", "is", null)
+      // Only countries cleared for outreach (countries.js); others wait
+      .in("country", SEND_COUNTRY_CODES)
       .gte("opportunity_score", 6)
       .limit(10);
 

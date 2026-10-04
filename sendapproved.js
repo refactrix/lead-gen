@@ -5,6 +5,7 @@ import imapSimple from "imap-simple";
 import crypto from "node:crypto";
 import dotenv from "dotenv";
 dotenv.config();
+import { SEND_COUNTRIES } from "./countries.js";
 
 // ─── Startup checks ──────────────────────────────────────────────────────────
 // Fail closed: never send without a working opt-out link and suppression check.
@@ -138,8 +139,10 @@ async function sendApproved() {
 
   const { data: leads, error } = await supabase
     .from("leads")
-    .select("id, business_name, email, email_subject, email_body")
+    .select("id, business_name, email, email_subject, email_body, country")
     .eq("email_status", "approved")
+    // Approved leads from other countries wait until added to countries.js
+    .in("country", Object.keys(SEND_COUNTRIES))
     .limit(BATCH_LIMIT);
 
   if (error) {
@@ -177,6 +180,13 @@ async function sendApproved() {
   for (const lead of leads) {
     if (!lead.email || !lead.email_body || !lead.email_subject) {
       console.log(`– Skipped (missing email, subject or body): ${lead.business_name}`);
+      skipped++;
+      continue;
+    }
+
+    // Checked again here in case the query above is ever changed
+    if (!SEND_COUNTRIES[lead.country]) {
+      console.log(`– Skipped (country ${lead.country ?? "unknown"} not cleared for outreach): ${lead.business_name}`);
       skipped++;
       continue;
     }

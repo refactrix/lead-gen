@@ -5,10 +5,10 @@ An automated pipeline that scrapes local business leads, audits their websites w
 ## How It Works
 
 ```
-Scraper → Supabase → Analyzer → Email Generator → Review & Send
+Lead finder → Supabase → Analyzer → Email Generator → Review & Send
 ```
 
-1. **Scraper** — finds local businesses via Google Maps using Playwright
+1. **Lead finder** — `leadfinder.js` lists businesses with a website in each search area from OpenStreetMap, then finds the business's own email on its website (no browser needed). Search areas (country + place + category) are managed on the admin's Automation page. The older Google Maps `scraper.js` is kept for reference but no longer used.
 2. **Analyzer** — fetches each website's HTML, checks a few facts directly (HTTPS, title, meta description, viewport, language, H1, image alt text), then audits the page text with Groq (`openai/gpt-oss-20b`), scoring it 1–10 for opportunity
 3. **Email Generator** — drafts a personalized cold email for each high-scoring lead using Groq (`openai/gpt-oss-20b`), led by the measured facts
 4. **Sender** — `sendapproved.js` sends approved drafts, skipping anyone on the suppression list
@@ -65,9 +65,12 @@ Your `leads` table should have these columns:
 | `email` | text |
 | `phone` | text |
 | `city` | text |
-| `country` | text |
+| `country` | text (ISO code, e.g. `GB`) |
 | `category` | text |
-| `google_maps_url` | text |
+| `google_maps_url` | text (Google Maps leads only) |
+| `source` | text (`osm` or `google_maps`) |
+| `source_id` | text (OSM id, e.g. `node/249231445`) |
+| `emails` | text[] (every matching address found) |
 | `domain` | text |
 | `status` | text |
 | `audit` | jsonb |
@@ -116,10 +119,22 @@ node emailgen.js
 
 | Workflow | Trigger | Runs | Reaches the outside world |
 |---|---|---|---|
-| `process-leads.yml` | Every 4 hours, and manually | `analyzer.js`, then `emailgen.js` | No (database and Groq only) |
+| `find-leads.yml` | Daily at 06:40 UTC, and manually | `leadfinder.js`, up to the chosen number of new leads | Reads OpenStreetMap and business websites; no email |
+| `process-leads.yml` | Every 4 hours, after each Find leads run, and manually | `analyzer.js`, then `emailgen.js` | No (database and Groq only) |
 | `send-approved.yml` | Manually only, for now | `sendapproved.js`, up to the chosen batch size | **Yes, sends email** |
 
-`scraper.js` and `emailscraper.js` still run locally. They need a browser, and the scraper's data source terms are being checked first.
+`scraper.js` and `emailscraper.js` (Google Maps, Playwright) are no longer used: scraping Google Maps breaks its terms. `leadfinder.js` replaced them.
+
+### Lead finder
+
+- **Search areas** are rows in `lead_targets`. Each run takes the 6 areas searched longest ago, adds up to `MAX_NEW_LEADS` (default 30), and visits at most 60 websites per area. An area is marked fully checked once every place has been visited, and is searched again after 90 days.
+- **Skipped:** chains (OSM `brand` tags, or the same website on 3+ places in an area), social pages and booking sites given as the website, domains already in `leads`, and addresses on the suppression list. Only an address on the business's own domain is used, the same rule `emailgen.js` applies.
+- **Checked places** are recorded in `lead_sources_seen` (map id and outcome only). Places without a usable email are checked again after 180 days.
+- **Politeness:** honours robots.txt, identifies itself as `RefactrixLeadFinder`, fetches the home page plus at most 3 contact/about pages, and keeps OpenStreetMap's usage limits (one Nominatim lookup per new area; Overpass falls back to mirror servers when busy).
+- **Data:** map data © OpenStreetMap contributors, available under the [ODbL](https://www.openstreetmap.org/copyright).
+- **Countries:** areas can be in any country. Only countries listed in `countries.js` (currently `GB`) are drafted and sent — see the notes there before adding one.
+
+Run it locally with `MAX_NEW_LEADS=5 node leadfinder.js`. Apply `migrations/2026-10-04_lead_finder.sql` first.
 
 In CI, `redact-logs.js` masks email addresses in all output (`i***@example.com`), because workflow logs are kept for 90 days and are public on a public repo. Scripts exit non-zero on database errors and failed sends, so GitHub emails a failure notice.
 

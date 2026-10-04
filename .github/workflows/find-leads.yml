@@ -1,0 +1,51 @@
+# Finds new leads from OpenStreetMap for the search areas set in the admin.
+# Reads public map data and business websites; writes to the database only.
+# Nothing is emailed from this workflow.
+name: Find leads
+
+on:
+  schedule:
+    # Daily at 06:40 UTC; "Process leads" then starts as soon as it finishes
+    - cron: "40 6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_leads:
+        description: "Maximum new leads to add in this run (1–100)"
+        required: true
+        default: "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: find-leads
+  cancel-in-progress: false
+
+jobs:
+  find:
+    # Pinned so the runner OS changes when we choose, not when GitHub moves
+    # ubuntu-latest (to Ubuntu 26 from 2026-10-19)
+    runs-on: ubuntu-24.04
+    # Secrets live in the Production environment, limited to the main branch
+    environment: Production
+    timeout-minutes: 40
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      # Manual runs use the input; scheduled runs use the repo variable
+      MAX_NEW_LEADS: ${{ inputs.max_leads || vars.MAX_NEW_LEADS || '30' }}
+      # No browser is needed: websites are fetched directly
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Find leads
+        run: node leadfinder.js
+        timeout-minutes: 30

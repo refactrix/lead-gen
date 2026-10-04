@@ -6,6 +6,10 @@ on:
   schedule:
     # Every 4 hours, at :17 to avoid the top-of-hour queue. Times are UTC.
     - cron: "17 */4 * * *"
+  # Straight after a lead finder run, so new leads don't wait for the cron
+  workflow_run:
+    workflows: ["Find leads"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
