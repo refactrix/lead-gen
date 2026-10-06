@@ -30,6 +30,14 @@ const FILE_LIKE = /\.(png|jpe?g|gif|webp|svg|ico|css|js)$/i;
 export const hostOf = (s = "") =>
   s.toLowerCase().trim().replace(/^https?:\/\//, "").split(/[/?#:]/)[0].replace(/^www\./, "");
 
+// Websites that aren't the business's own site, so there is nothing to audit
+const NOT_OWN_SITE = [
+  "facebook.com", "instagram.com", "twitter.com", "x.com", "tiktok.com", "youtube.com",
+  "linkedin.com", "linktr.ee", "wa.me", "google.com", "business.site", "yell.com",
+  "tripadvisor.com", "tripadvisor.co.uk", "booksy.com", "fresha.com", "treatwell.co.uk",
+  "ubereats.com", "deliveroo.co.uk", "just-eat.co.uk", "opentable.com", "opentable.co.uk",
+];
+export const isOwnSite = (domain) => !NOT_OWN_SITE.some((d) => domain === d || domain.endsWith("." + d));
 /** Same rule emailgen.js applies before drafting. */
 export function emailMatchesSite(email, site) {
   const e = hostOf(email.split("@")[1]);

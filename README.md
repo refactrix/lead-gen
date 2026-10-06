@@ -8,7 +8,7 @@ An automated pipeline that scrapes local business leads, audits their websites w
 Lead finder → Supabase → Analyzer → Email Generator → Review & Send
 ```
 
-1. **Lead finder** — `leadfinder.js` lists businesses with a website in each search area from OpenStreetMap, then finds the business's own email on its website (no browser needed). Search areas (country + place + category) are managed on the admin's Automation page. The older Google Maps `scraper.js` is kept for reference but no longer used.
+1. **Lead finder** — `leadfinder.js` lists businesses with a website in each search area from OpenStreetMap, then finds the business's own email on its website (no browser needed). Search areas (country + place + category) are managed on the admin's Automation page. `scraper.js` adds Google Maps as an optional, local-only second source (see below).
 2. **Analyzer** — fetches each website's HTML, checks a few facts directly (HTTPS, title, meta description, viewport, language, H1, image alt text), then audits the page text with Groq (`openai/gpt-oss-20b`), scoring it 1–10 for opportunity
 3. **Email Generator** — drafts a personalized cold email for each high-scoring lead using Groq (`openai/gpt-oss-20b`), led by the measured facts
 4. **Sender** — `sendapproved.js` sends approved drafts, skipping anyone on the suppression list
@@ -123,7 +123,7 @@ node emailgen.js
 | `process-leads.yml` | Every 4 hours, after each Find leads run, and manually | `analyzer.js`, then `emailgen.js` | No (database and Groq only) |
 | `send-approved.yml` | Manually only, for now | `sendapproved.js`, up to the chosen batch size | **Yes, sends email** |
 
-`scraper.js` and `emailscraper.js` (Google Maps, Playwright) are no longer used: scraping Google Maps breaks its terms. `leadfinder.js` replaced them.
+`scraper.js` (Google Maps, Playwright) runs only locally, and only when `Run Leads.cmd` is answered "y". Scraping Google Maps is against Google's terms of service; it is used knowingly, at low volume (3 random searches from the search areas, up to 15 leads), and never from GitHub. It saves leads with the same rules as `leadfinder.js` (own-domain email, suppression list, country, `lead_sources_seen` with source `google_maps`). `emailscraper.js` is no longer used.
 
 ### Lead finder
 
@@ -134,7 +134,7 @@ node emailgen.js
 - **Data:** map data © OpenStreetMap contributors, available under the [ODbL](https://www.openstreetmap.org/copyright).
 - **Countries:** areas can be in any country. Only countries listed in `countries.js` (currently `GB`) are drafted and sent — see the notes there before adding one.
 
-**On this PC:** double-click `Run Leads.cmd`. It asks how many new leads to look for, then runs `leadfinder.js`, `analyzer.js` and `emailgen.js` in turn, shows a summary, and saves a log in `logs/` (git-ignored, as it holds email addresses). It never sends anything. It needs Node.js 24 and the `.env` file in this folder, and installs packages on its first run. The same public map servers are used as on GitHub, so a busy server can fail an area here too; that area is simply tried again next run.
+**On this PC:** double-click `Run Leads.cmd`. It asks how many new leads to look for and whether to also search Google Maps (default no), then runs `leadfinder.js`, `scraper.js` if chosen, `analyzer.js` and `emailgen.js` in turn, shows a summary, and saves a log in `logs/` (git-ignored, as it holds email addresses). It never sends anything. It needs Node.js 24 and the `.env` file in this folder, and installs packages on its first run. The same public map servers are used as on GitHub, so a busy server can fail an area here too; that area is simply tried again next run.
 
 Or run a single step: `MAX_NEW_LEADS=5 node leadfinder.js`. Apply `migrations/2026-10-04_lead_finder.sql` and `migrations/2026-10-06_lead_finder_fixes.sql` first.
 

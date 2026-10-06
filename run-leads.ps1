@@ -1,6 +1,7 @@
-# Runs the whole lead pipeline on this PC: find new leads, audit their
-# websites, then draft emails for review. Nothing is emailed: approve drafts
-# on refactrix.com/powerbox/emails, then send from the Automation page.
+# Runs the whole lead pipeline on this PC: find new leads (OpenStreetMap, plus
+# Google Maps if asked), audit their websites, then draft emails for review.
+# Nothing is emailed: approve drafts on refactrix.com/powerbox/emails, then
+# send from the Automation page.
 #
 # Start it by double-clicking "Run Leads.cmd". Needs Node.js 24 and the .env
 # file in this folder (the same one the scripts always use).
@@ -54,19 +55,32 @@ if ($answer.Trim()) {
 }
 $env:MAX_NEW_LEADS = "$max"
 
+# Optional: Google Maps (scraper.js). Off unless someone types y.
+$gm = Read-Host 'Also search Google Maps for up to 15 more? Adds 5-15 minutes (y/N)'
+$useGoogleMaps = $gm.Trim().ToLower() -in @('y', 'yes')
+if ($useGoogleMaps) {
+    Say 'Checking the browser for Google Maps (first time downloads it)...' 'Yellow'
+    # The project's own Playwright, so npx never offers to download another
+    & cmd /c 'node node_modules\playwright\cli.js install chromium'
+    if ($LASTEXITCODE -ne 0) { Fail 'Could not install the browser for Google Maps. Run again and answer N to skip it.' }
+}
+$total = if ($useGoogleMaps) { 4 } else { 3 }
+
 # --- Run ----------------------------------------------------------------------
 
 New-Item -ItemType Directory -Force -Path 'logs' | Out-Null
 $log = Join-Path 'logs' ("leads-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HHmm'))
 
-function Step($number, $title, $script) {
+$script:stepNumber = 0
+function Step($title, $file) {
+    $script:stepNumber++
     Say ''
-    Say "[$number/3] $title" 'Cyan'
+    Say "[$($script:stepNumber)/$total] $title" 'Cyan'
     Say ('-' * 60) 'DarkGray'
     Add-Content -LiteralPath $log -Encoding UTF8 -Value "`n===== $title ($(Get-Date -Format 'HH:mm:ss')) ====="
     # Through cmd so Node's error output arrives as plain text. Lines go to the
     # screen and the log only, so the function returns just the exit code.
-    & cmd /c "node $script 2>&1" | ForEach-Object {
+    & cmd /c "node $file 2>&1" | ForEach-Object {
         Write-Host $_
         Add-Content -LiteralPath $log -Encoding UTF8 -Value $_
     }
@@ -75,10 +89,15 @@ function Step($number, $title, $script) {
 
 $started = Get-Date
 $results = [ordered]@{}
-$results['Find new leads'] = Step 1 'Finding new leads (OpenStreetMap + business websites)' 'leadfinder.js'
-# Audit and drafting run even if some search areas failed, like on GitHub
-$results['Audit websites'] = Step 2 'Auditing websites' 'analyzer.js'
-$results['Draft emails'] = Step 3 'Drafting emails' 'emailgen.js'
+$results['Find new leads (OpenStreetMap)'] = Step 'Finding new leads (OpenStreetMap + business websites)' 'leadfinder.js'
+if ($useGoogleMaps) {
+    # Kept small: Google Maps is a secondary source, read slowly page by page
+    $env:MAX_NEW_LEADS = "$([math]::Min($max, 15))"
+    $results['Find new leads (Google Maps)'] = Step 'Finding new leads (Google Maps + business websites)' 'scraper.js'
+}
+# Audit and drafting run even if a search step had problems, like on GitHub
+$results['Audit websites'] = Step 'Auditing websites' 'analyzer.js'
+$results['Draft emails'] = Step 'Drafting emails' 'emailgen.js'
 
 # --- Summary ------------------------------------------------------------------
 

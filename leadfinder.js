@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 dotenv.config();
 import { CATEGORIES } from "./categories.js";
-import { findSiteEmails, hostOf, normalizeWebsite } from "./sitecontacts.js";
+import { findSiteEmails, hostOf, isOwnSite, normalizeWebsite } from "./sitecontacts.js";
 
 // Finds new leads from OpenStreetMap (data © OpenStreetMap contributors, ODbL).
 //
@@ -35,14 +35,6 @@ const OVERPASS_ENDPOINTS = [
   "https://overpass.kumi.systems/api/interpreter",
 ];
 
-// Websites that aren't the business's own site, so there is nothing to audit
-const NOT_OWN_SITE = [
-  "facebook.com", "instagram.com", "twitter.com", "x.com", "tiktok.com", "youtube.com",
-  "linkedin.com", "linktr.ee", "wa.me", "google.com", "business.site", "yell.com",
-  "tripadvisor.com", "tripadvisor.co.uk", "booksy.com", "fresha.com", "treatwell.co.uk",
-  "ubereats.com", "deliveroo.co.uk", "just-eat.co.uk", "opentable.com", "opentable.co.uk",
-];
-const isOwnSite = (domain) => !NOT_OWN_SITE.some((d) => domain === d || domain.endsWith("." + d));
 // The same website on this many places in one area means a chain or a directory
 const CHAIN_THRESHOLD = 3;
 
