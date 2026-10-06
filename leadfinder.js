@@ -238,70 +238,75 @@ async function searchArea(target, knownDomains, quota) {
 
   const queue = fresh.slice(0, MAX_CHECKS_PER_AREA);
   let found = 0;
+  let inFlight = 0; // places being checked right now, so 4 workers can't overshoot the quota
   let checked = 0;
   let failure = null;
 
   async function worker() {
     try {
-      await work();
+      while (queue.length && found + inFlight < quota && !outOfTime() && !failure) {
+        inFlight++;
+        try {
+          await checkPlace(queue.shift());
+        } finally {
+          inFlight--;
+        }
+      }
     } catch (err) {
       failure ??= err;
     }
   }
 
-  async function work() {
-    while (queue.length && found < quota && !outOfTime() && !failure) {
-      const place = queue.shift();
-      // Another worker may have just added a lead for the same domain
-      if (knownDomains.has(place.domain)) {
-        await markSeen(place.sourceId, "duplicate");
-        continue;
-      }
-      checked++;
-      const { emails, outcome } = await findSiteEmails(place.website, place.emails).catch(() => ({
-        emails: [],
-        outcome: "unreachable",
-      }));
-      if (outcome !== "found") {
-        console.log(`  – ${place.name}: ${outcome.replace("_", " ")}`);
-        await markSeen(place.sourceId, outcome);
-        continue;
-      }
-      if (await isSuppressed(emails)) {
-        console.log(`  – ${place.name}: unsubscribed earlier`);
-        await markSeen(place.sourceId, "suppressed");
-        continue;
-      }
-
-      knownDomains.add(place.domain);
-      const { error } = await supabase.from("leads").insert({
-        business_name: place.name,
-        website: place.website,
-        domain: place.domain,
-        email: emails[0],
-        emails,
-        phone: place.phone,
-        city: place.city || target.area,
-        country: target.country,
-        category: target.category,
-        source: "osm",
-        source_id: place.sourceId,
-        audit_status: "pending",
-      });
-      if (error?.code === "23505") {
-        console.log(`  – ${place.name}: already a lead`);
-        await markSeen(place.sourceId, "duplicate");
-        continue;
-      }
-      if (error) {
-        // Not recorded as checked, so this place is tried again next run
-        knownDomains.delete(place.domain);
-        throw new DatabaseError(`Saving a lead failed: ${error.message}`);
-      }
-      found++;
-      console.log(`  ✓ ${place.name} → ${emails[0]}`);
-      await markSeen(place.sourceId, "lead");
+  async function checkPlace(place) {
+    // Another worker may have just added a lead for the same domain
+    if (knownDomains.has(place.domain)) {
+      await markSeen(place.sourceId, "duplicate");
+      return;
     }
+    checked++;
+    const { emails, outcome } = await findSiteEmails(place.website, place.emails).catch(() => ({
+      emails: [],
+      outcome: "unreachable",
+    }));
+    if (outcome !== "found") {
+      console.log(`  – ${place.name}: ${outcome.replace("_", " ")}`);
+      await markSeen(place.sourceId, outcome);
+      return;
+    }
+    if (await isSuppressed(emails)) {
+      console.log(`  – ${place.name}: unsubscribed earlier`);
+      await markSeen(place.sourceId, "suppressed");
+      return;
+    }
+
+    knownDomains.add(place.domain);
+    const { error } = await supabase.from("leads").insert({
+      business_name: place.name,
+      website: place.website,
+      domain: place.domain,
+      email: emails[0],
+      emails,
+      phone: place.phone,
+      city: place.city || target.area,
+      country: target.country,
+      category: target.category,
+      source: "osm",
+      source_id: place.sourceId,
+      audit_status: "pending",
+    });
+    if (error?.code === "23505") {
+      console.log(`  – ${place.name}: already a lead`);
+      await markSeen(place.sourceId, "duplicate");
+      return;
+    }
+    if (error) {
+      // Not recorded as checked, so this place is tried again next run
+      knownDomains.delete(place.domain);
+      throw new DatabaseError(`Saving a lead failed: ${error.message}`);
+    }
+    found++;
+    console.log(`  ✓ ${place.name} → ${emails[0]}`);
+    await markSeen(place.sourceId, "lead");
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   if (failure) throw failure;
@@ -341,6 +346,8 @@ async function main() {
   const knownDomains = await loadKnownDomains();
   let total = 0;
   let checked = 0;
+  let searched = 0;
+  let failed = 0;
 
   for (const target of targets) {
     if (total >= MAX_NEW_LEADS || outOfTime()) break;
@@ -348,14 +355,19 @@ async function main() {
       const r = await searchArea(target, knownDomains, MAX_NEW_LEADS - total);
       total += r.found;
       checked += r.checked;
+      searched++;
     } catch (err) {
       if (err instanceof DatabaseError) throw err;
       // Not marked exhausted, so it comes round again after the other areas
       console.error(`  Search failed: ${err.message}`);
       await updateTarget(target.id, { last_run_at: new Date().toISOString(), last_error: err.message.slice(0, 300) });
-      process.exitCode = 1;
+      failed++;
     }
   }
+
+  // A busy map server failing one area is normal; only flag the run when
+  // no area could be searched at all
+  if (failed && !searched) process.exitCode = 1;
 
   console.log(`\nDone. ${total} new leads from ${checked} websites checked.`);
   if (outOfTime()) console.log("Stopped at the time limit; the rest continues next run.");

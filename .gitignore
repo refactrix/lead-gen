@@ -1,2 +1,4 @@
 .env
 node_modules
+# Local run logs (run-leads.ps1) contain lead email addresses
+logs/
