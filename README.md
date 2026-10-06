@@ -134,7 +134,9 @@ node emailgen.js
 - **Data:** map data © OpenStreetMap contributors, available under the [ODbL](https://www.openstreetmap.org/copyright).
 - **Countries:** areas can be in any country. Only countries listed in `countries.js` (currently `GB`) are drafted and sent — see the notes there before adding one.
 
-Run it locally with `MAX_NEW_LEADS=5 node leadfinder.js`. Apply `migrations/2026-10-04_lead_finder.sql` first.
+Run it locally with `MAX_NEW_LEADS=5 node leadfinder.js`. Apply `migrations/2026-10-04_lead_finder.sql` and `migrations/2026-10-06_lead_finder_fixes.sql` first.
+
+A database error stops the run straight away, without recording the place as checked, so nothing is lost. OpenStreetMap requests use a plain `RefactrixLeadFinder/1.0` user agent with a contact address: overpass-api.de rejects browser-style ones with HTTP 406.
 
 In CI, `redact-logs.js` masks email addresses in all output (`i***@example.com`), because workflow logs are kept for 90 days and are public on a public repo. Scripts exit non-zero on database errors and failed sends, so GitHub emails a failure notice.
 

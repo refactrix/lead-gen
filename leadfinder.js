@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 dotenv.config();
 import { CATEGORIES } from "./categories.js";
-import { findSiteEmails, hostOf, normalizeWebsite, USER_AGENT } from "./sitecontacts.js";
+import { findSiteEmails, hostOf, normalizeWebsite } from "./sitecontacts.js";
 
 // Finds new leads from OpenStreetMap (data © OpenStreetMap contributors, ODbL).
 //
@@ -20,9 +20,14 @@ const MAX_NEW_LEADS = Math.min(Math.max(parseInt(process.env.MAX_NEW_LEADS ?? "3
 const MAX_AREAS_PER_RUN = 6;
 const MAX_CHECKS_PER_AREA = 60; // websites visited per area per run
 const CONCURRENCY = 4;
-const TIME_BUDGET_MS = 25 * 60_000;
+// The workflow step is killed at 30 minutes; one slow map query can take ~2
+const TIME_BUDGET_MS = 20 * 60_000;
 const REVISIT_DAYS = 90;
 const RECHECK_DAYS = 180; // places without a usable email are checked again after this
+
+// OpenStreetMap services want an app name and contact. overpass-api.de
+// answers 406 to browser-style user agents ("Mozilla/5.0 (compatible; …)").
+const OSM_USER_AGENT = "RefactrixLeadFinder/1.0 (+https://www.refactrix.com; mohit.j@refactrix.com)";
 
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -47,6 +52,10 @@ const outOfTime = () => Date.now() - startedAt > TIME_BUDGET_MS;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const daysAgo = (n) => new Date(Date.now() - n * 86_400_000).toISOString();
 
+// A database failure stops the run: carrying on would record places as
+// checked without saving them as leads.
+class DatabaseError extends Error {}
+
 // ─── OpenStreetMap ───────────────────────────────────────────────────────────
 
 /** Finds the area's boundary in OSM (Nominatim: max 1 request per second). */
@@ -58,7 +67,7 @@ async function resolveArea(target) {
     limit: "5",
   });
   const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-    headers: { "User-Agent": USER_AGENT },
+    headers: { "User-Agent": OSM_USER_AGENT },
     signal: AbortSignal.timeout(20_000),
   });
   await sleep(1100);
@@ -73,26 +82,31 @@ async function resolveArea(target) {
 
 async function overpass(query) {
   let lastError;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const res = await fetch(endpoint, {
-          method: "POST",
-          headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ data: query }),
-          signal: AbortSignal.timeout(130_000),
-        });
-        const text = await res.text();
-        if (!res.ok || !text.startsWith("{")) throw new Error(`HTTP ${res.status}`);
-        const json = JSON.parse(text);
-        // A query that ran out of time still answers 200, with a remark
-        if (json.remark && /error|timed out/i.test(json.remark)) throw new Error(json.remark);
-        return json.elements;
-      } catch (err) {
-        lastError = err;
-        console.warn(`  Overpass ${new URL(endpoint).host} failed (${err.message})`);
-        await sleep(attempt * 10_000);
-      }
+  // The main server twice, then each mirror once; mirrors are often overloaded
+  const attempts = [OVERPASS_ENDPOINTS[0], OVERPASS_ENDPOINTS[0], ...OVERPASS_ENDPOINTS.slice(1)];
+  for (const [i, endpoint] of attempts.entries()) {
+    if (outOfTime()) break;
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "User-Agent": OSM_USER_AGENT,
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ data: query }),
+        signal: AbortSignal.timeout(100_000),
+      });
+      const text = await res.text();
+      if (!res.ok || !text.startsWith("{")) throw new Error(`HTTP ${res.status}`);
+      const json = JSON.parse(text);
+      // A query that ran out of time still answers 200, with a remark
+      if (json.remark && /error|timed out/i.test(json.remark)) throw new Error(json.remark);
+      return json.elements;
+    } catch (err) {
+      lastError = err;
+      console.warn(`  Overpass ${new URL(endpoint).host} failed (${err.message})`);
+      if (i < attempts.length - 1) await sleep(10_000);
     }
   }
   throw new Error(`All Overpass servers failed: ${lastError?.message}`);
@@ -103,7 +117,7 @@ async function listPlaces(target) {
   const parts = tags.flatMap(([k, v]) =>
     ["website", "contact:website"].map((w) => `nwr["${k}"="${v}"]["${w}"](area.a);`),
   );
-  const query = `[out:json][timeout:120];area(id:${target.osm_area_id})->.a;(${parts.join("")});out tags;`;
+  const query = `[out:json][timeout:90];area(id:${target.osm_area_id})->.a;(${parts.join("")});out tags;`;
   return overpass(query);
 }
 
@@ -178,7 +192,7 @@ async function markSeen(sourceIds, outcome) {
 
 async function isSuppressed(emails) {
   const { data, error } = await supabase.from("suppressions").select("email").in("email", emails);
-  if (error) throw new Error(`Reading suppressions failed: ${error.message}`);
+  if (error) throw new DatabaseError(`Reading suppressions failed: ${error.message}`);
   return data.length > 0;
 }
 
@@ -225,9 +239,18 @@ async function searchArea(target, knownDomains, quota) {
   const queue = fresh.slice(0, MAX_CHECKS_PER_AREA);
   let found = 0;
   let checked = 0;
+  let failure = null;
 
   async function worker() {
-    while (queue.length && found < quota && !outOfTime()) {
+    try {
+      await work();
+    } catch (err) {
+      failure ??= err;
+    }
+  }
+
+  async function work() {
+    while (queue.length && found < quota && !outOfTime() && !failure) {
       const place = queue.shift();
       // Another worker may have just added a lead for the same domain
       if (knownDomains.has(place.domain)) {
@@ -265,12 +288,15 @@ async function searchArea(target, knownDomains, quota) {
         source_id: place.sourceId,
         audit_status: "pending",
       });
-      if (error) {
-        const duplicate = error.code === "23505";
-        console[duplicate ? "log" : "error"](`  – ${place.name}: ${duplicate ? "already a lead" : `insert failed: ${error.message}`}`);
-        if (!duplicate) process.exitCode = 1;
-        await markSeen(place.sourceId, duplicate ? "duplicate" : "error");
+      if (error?.code === "23505") {
+        console.log(`  – ${place.name}: already a lead`);
+        await markSeen(place.sourceId, "duplicate");
         continue;
+      }
+      if (error) {
+        // Not recorded as checked, so this place is tried again next run
+        knownDomains.delete(place.domain);
+        throw new DatabaseError(`Saving a lead failed: ${error.message}`);
       }
       found++;
       console.log(`  ✓ ${place.name} → ${emails[0]}`);
@@ -278,6 +304,7 @@ async function searchArea(target, knownDomains, quota) {
     }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  if (failure) throw failure;
 
   // Places taken off the queue were all recorded, whatever the outcome
   const remaining = fresh.length - (Math.min(fresh.length, MAX_CHECKS_PER_AREA) - queue.length);
@@ -322,6 +349,7 @@ async function main() {
       total += r.found;
       checked += r.checked;
     } catch (err) {
+      if (err instanceof DatabaseError) throw err;
       // Not marked exhausted, so it comes round again after the other areas
       console.error(`  Search failed: ${err.message}`);
       await updateTarget(target.id, { last_run_at: new Date().toISOString(), last_error: err.message.slice(0, 300) });
