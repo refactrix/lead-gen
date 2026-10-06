@@ -123,7 +123,7 @@ node emailgen.js
 | `process-leads.yml` | Every 4 hours, after each Find leads run, and manually | `analyzer.js`, then `emailgen.js` | No (database and Groq only) |
 | `send-approved.yml` | Manually only, for now | `sendapproved.js`, up to the chosen batch size | **Yes, sends email** |
 
-`scraper.js` (Google Maps, Playwright) runs only locally, and only when `Run Leads.cmd` is answered "y". Scraping Google Maps is against Google's terms of service; it is used knowingly, at low volume (3 random searches from the search areas, up to 15 leads), and never from GitHub. It saves leads with the same rules as `leadfinder.js` (own-domain email, suppression list, country, `lead_sources_seen` with source `google_maps`). `emailscraper.js` is no longer used.
+`scraper.js` (Google Maps, Playwright) runs only locally, as the second step of `Run Leads.cmd`. Scraping Google Maps is against Google's terms of service; it is used knowingly, at low volume (3 random searches from the search areas, up to 15 leads), and never from GitHub. It saves leads with the same rules as `leadfinder.js` (own-domain email, suppression list, country, `lead_sources_seen` with source `google_maps`). `emailscraper.js` is no longer used.
 
 ### Lead finder
 
@@ -134,7 +134,7 @@ node emailgen.js
 - **Data:** map data © OpenStreetMap contributors, available under the [ODbL](https://www.openstreetmap.org/copyright).
 - **Countries:** areas can be in any country. Only countries listed in `countries.js` (currently `GB`) are drafted and sent — see the notes there before adding one.
 
-**On this PC:** double-click `Run Leads.cmd`. It asks how many new leads to look for and whether to also search Google Maps (default no), then runs `leadfinder.js`, `scraper.js` if chosen, `analyzer.js` and `emailgen.js` in turn, shows a summary, and saves a log in `logs/` (git-ignored, as it holds email addresses). It never sends anything. It needs Node.js 24 and the `.env` file in this folder, and installs packages on its first run. The same public map servers are used as on GitHub, so a busy server can fail an area here too; that area is simply tried again next run.
+**On this PC:** double-click `Run Leads.cmd` (or its desktop shortcut). It only finds leads: it asks how many to look for, runs `leadfinder.js` (OpenStreetMap) and then `scraper.js` (Google Maps, up to 15), shows a summary, and saves a log in `logs/` (git-ignored, as it holds email addresses). Auditing and drafting are left to the `process-leads` workflow, which runs every 4 hours or on **Run now** in the admin; a local run doesn't trigger it. It needs Node.js 24 and the `.env` file in this folder, and installs packages and Playwright's browser on first use. The same public map servers are used as on GitHub, so a busy server can fail an area here too; that area is simply tried again next run.
 
 Or run a single step: `MAX_NEW_LEADS=5 node leadfinder.js`. Apply `migrations/2026-10-04_lead_finder.sql` and `migrations/2026-10-06_lead_finder_fixes.sql` first.
 

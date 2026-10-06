@@ -1,7 +1,9 @@
-# Runs the whole lead pipeline on this PC: find new leads (OpenStreetMap, plus
-# Google Maps if asked), audit their websites, then draft emails for review.
-# Nothing is emailed: approve drafts on refactrix.com/powerbox/emails, then
-# send from the Automation page.
+# Finds new leads on this PC: OpenStreetMap first, then Google Maps. Leads are
+# saved to the database and nothing else happens here.
+#
+# Auditing and email drafts are automated on GitHub ("Process leads", every
+# 4 hours, or Run now on refactrix.com/powerbox/automation). Nothing is
+# emailed without approval on the Emails page.
 #
 # Start it by double-clicking "Run Leads.cmd". Needs Node.js 24 and the .env
 # file in this folder (the same one the scripts always use).
@@ -9,7 +11,7 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Host.UI.RawUI.WindowTitle = 'Refactrix - Find and process leads'
+$Host.UI.RawUI.WindowTitle = 'Refactrix - Find new leads'
 
 function Say($text, $color = 'Gray') { Write-Host $text -ForegroundColor $color }
 function Fail($text) {
@@ -19,9 +21,9 @@ function Fail($text) {
 }
 
 Say ''
-Say '  REFACTRIX LEAD PIPELINE' 'Cyan'
-Say '  Finds new leads, audits their websites and drafts emails.' 'Cyan'
-Say '  Nothing is sent. Drafts wait for review on the Emails page.' 'Cyan'
+Say '  REFACTRIX - FIND NEW LEADS' 'Cyan'
+Say '  Searches OpenStreetMap, then Google Maps, and saves new leads.' 'Cyan'
+Say '  Auditing and email drafts then happen automatically online.' 'Cyan'
 Say ''
 
 # --- Checks -------------------------------------------------------------------
@@ -42,9 +44,14 @@ if (-not (Test-Path -LiteralPath 'node_modules')) {
     if ($LASTEXITCODE -ne 0) { Fail 'Installing packages failed. Check the internet connection and try again.' }
 }
 
+# Google Maps needs Playwright's browser. Quick when it's already installed.
+# The project's own Playwright, so npx never offers to download another.
+& cmd /c 'node node_modules\playwright\cli.js install chromium >nul 2>&1'
+$browserReady = $LASTEXITCODE -eq 0
+
 # --- How many -----------------------------------------------------------------
 
-$answer = Read-Host 'How many new leads should it look for? Press Enter for 30 (1-100)'
+$answer = Read-Host 'How many new leads should OpenStreetMap look for? Press Enter for 30 (1-100)'
 $max = 30
 if ($answer.Trim()) {
     $n = 0
@@ -53,18 +60,8 @@ if ($answer.Trim()) {
     }
     $max = $n
 }
-$env:MAX_NEW_LEADS = "$max"
-
-# Optional: Google Maps (scraper.js). Off unless someone types y.
-$gm = Read-Host 'Also search Google Maps for up to 15 more? Adds 5-15 minutes (y/N)'
-$useGoogleMaps = $gm.Trim().ToLower() -in @('y', 'yes')
-if ($useGoogleMaps) {
-    Say 'Checking the browser for Google Maps (first time downloads it)...' 'Yellow'
-    # The project's own Playwright, so npx never offers to download another
-    & cmd /c 'node node_modules\playwright\cli.js install chromium'
-    if ($LASTEXITCODE -ne 0) { Fail 'Could not install the browser for Google Maps. Run again and answer N to skip it.' }
-}
-$total = if ($useGoogleMaps) { 4 } else { 3 }
+# Google Maps is the secondary source, read slowly page by page
+$googleMax = [math]::Min($max, 15)
 
 # --- Run ----------------------------------------------------------------------
 
@@ -72,12 +69,13 @@ New-Item -ItemType Directory -Force -Path 'logs' | Out-Null
 $log = Join-Path 'logs' ("leads-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HHmm'))
 
 $script:stepNumber = 0
-function Step($title, $file) {
+function Step($title, $file, $limit) {
     $script:stepNumber++
     Say ''
-    Say "[$($script:stepNumber)/$total] $title" 'Cyan'
+    Say "[$($script:stepNumber)/2] $title" 'Cyan'
     Say ('-' * 60) 'DarkGray'
     Add-Content -LiteralPath $log -Encoding UTF8 -Value "`n===== $title ($(Get-Date -Format 'HH:mm:ss')) ====="
+    $env:MAX_NEW_LEADS = "$limit"
     # Through cmd so Node's error output arrives as plain text. Lines go to the
     # screen and the log only, so the function returns just the exit code.
     & cmd /c "node $file 2>&1" | ForEach-Object {
@@ -89,15 +87,14 @@ function Step($title, $file) {
 
 $started = Get-Date
 $results = [ordered]@{}
-$results['Find new leads (OpenStreetMap)'] = Step 'Finding new leads (OpenStreetMap + business websites)' 'leadfinder.js'
-if ($useGoogleMaps) {
-    # Kept small: Google Maps is a secondary source, read slowly page by page
-    $env:MAX_NEW_LEADS = "$([math]::Min($max, 15))"
-    $results['Find new leads (Google Maps)'] = Step 'Finding new leads (Google Maps + business websites)' 'scraper.js'
+$results['OpenStreetMap'] = Step "OpenStreetMap: up to $max new leads" 'leadfinder.js' $max
+if ($browserReady) {
+    $results['Google Maps'] = Step "Google Maps: up to $googleMax new leads" 'scraper.js' $googleMax
+} else {
+    Say ''
+    Say '[2/2] Google Maps skipped: its browser could not be installed (check the internet connection).' 'Yellow'
+    $results['Google Maps'] = 1
 }
-# Audit and drafting run even if a search step had problems, like on GitHub
-$results['Audit websites'] = Step 'Auditing websites' 'analyzer.js'
-$results['Draft emails'] = Step 'Drafting emails' 'emailgen.js'
 
 # --- Summary ------------------------------------------------------------------
 
@@ -111,5 +108,6 @@ foreach ($r in $results.GetEnumerator()) {
 }
 Say ''
 Say "  Log saved to: $(Join-Path $PSScriptRoot $log)"
-Say '  Next: review the drafts at https://www.refactrix.com/powerbox/emails'
+Say '  Next: new leads are audited and drafted automatically within 4 hours.'
+Say '  To start that now: refactrix.com/powerbox/automation > Process leads > Run now'
 Say ('=' * 60) 'DarkGray'
