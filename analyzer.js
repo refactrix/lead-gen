@@ -1,4 +1,4 @@
-﻿import "./redact-logs.js";
+import "./redact-logs.js";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from "cheerio";
 import dotenv from "dotenv";
@@ -138,89 +138,119 @@ ${html}`;
   }
 }
 
+// The workflow step is stopped at 15 minutes; an audit takes about 15 seconds
+const TIME_BUDGET_MS = 11 * 60_000;
+const BATCH = 20;
+
+const validScore = (n) => Number.isInteger(n) && n >= 1 && n <= 10;
+
 async function runAnalyzer() {
-  console.log("Fetching pending leads...");
+  const startedAt = Date.now();
+  // Each lead is tried at most once per run, so a failure isn't retried at once
+  const tried = new Set();
+  let total = 0;
 
-  const { data: leads, error } = await supabase
-    .from("leads")
-    .select("id, business_name, website, audit_attempts")
-    .in("audit_status", ["pending", "processing", "failed"])
-    .lt("audit_attempts", MAX_ATTEMPTS)
-    .not("website", "is", null)
-    .limit(20);
+  // Batch after batch until the queue is empty, so a big lead finder run
+  // doesn't wait hours for later runs
+  while (Date.now() - startedAt < TIME_BUDGET_MS) {
+    console.log("Fetching pending leads...");
 
-  if (error) {
-    console.error("Error fetching leads:", error.message);
-    process.exitCode = 1;
-    return;
+    const { data, error } = await supabase
+      .from("leads")
+      .select("id, business_name, website, audit_attempts")
+      .in("audit_status", ["pending", "processing", "failed"])
+      .lt("audit_attempts", MAX_ATTEMPTS)
+      .not("website", "is", null)
+      .order("created_at", { ascending: true })
+      .limit(BATCH + tried.size);
+
+    if (error) {
+      console.error("Error fetching leads:", error.message);
+      process.exitCode = 1;
+      return;
+    }
+
+    const leads = data.filter((l) => !tried.has(l.id)).slice(0, BATCH);
+    console.log(`Found ${leads.length} leads to analyze`);
+    if (!leads.length) break;
+
+    for (const lead of leads) {
+      if (Date.now() - startedAt >= TIME_BUDGET_MS) break;
+      tried.add(lead.id);
+      total++;
+      await analyzeLead(lead);
+    }
   }
 
-  console.log(`Found ${leads.length} leads to analyze`);
+  if (Date.now() - startedAt >= TIME_BUDGET_MS) {
+    console.log("\nStopped at the time limit; the rest are audited next run.");
+  }
+  console.log(`\nAnalysis complete. ${total} leads audited this run.`);
+}
 
-  for (const lead of leads) {
-    console.log(`\nAnalyzing: ${lead.business_name} | ${lead.website}`);
+async function analyzeLead(lead) {
+  console.log(`\nAnalyzing: ${lead.business_name} | ${lead.website}`);
 
-    // Mark as processing
-    await supabase
-      .from("leads")
-      .update({ audit_status: "processing" })
-      .eq("id", lead.id);
+  // Mark as processing
+  await supabase
+    .from("leads")
+    .update({ audit_status: "processing" })
+    .eq("id", lead.id);
 
-    // Failed rows are retried on later runs until MAX_ATTEMPTS is reached
-    const markFailed = () =>
-      supabase
-        .from("leads")
-        .update({
-          audit_status: "failed",
-          audit_attempts: (lead.audit_attempts ?? 0) + 1,
-        })
-        .eq("id", lead.id);
-
-    const page = await fetchWebsiteHTML(lead.website);
-
-    if (!page) {
-      await markFailed();
-      continue;
-    }
-
-    const audit = await analyzeWebsite(
-      page.text,
-      page.measured.issues,
-      lead.business_name,
-      lead.website,
-    );
-
-    if (!audit) {
-      await markFailed();
-      continue;
-    }
-
-    const { error: updateError } = await supabase
+  // Failed rows are retried on later runs until MAX_ATTEMPTS is reached
+  const markFailed = () =>
+    supabase
       .from("leads")
       .update({
-        audit: {
-          ...audit,
-          measured_issues: page.measured.issues,
-          checks: page.measured.checks,
-        },
-        opportunity_score: audit.opportunity_score,
-        audit_status: "done",
+        audit_status: "failed",
+        audit_attempts: (lead.audit_attempts ?? 0) + 1,
       })
       .eq("id", lead.id);
 
-    if (updateError) {
-      console.error("Update error:", updateError.message);
-    } else {
-      console.log(
-        `Done: ${lead.business_name} | Score: ${audit.opportunity_score}/10`,
-      );
-    }
+  const page = await fetchWebsiteHTML(lead.website);
 
-    // Small delay to avoid rate limiting
-    await new Promise((r) => setTimeout(r, 4000));
+  if (!page) {
+    await markFailed();
+    return;
   }
 
-  console.log("\nAnalysis complete.");
+  const audit = await analyzeWebsite(
+    page.text,
+    page.measured.issues,
+    lead.business_name,
+    lead.website,
+  );
+
+  // Without a usable score the lead could never be drafted, so it's retried
+  if (!audit || !validScore(audit.opportunity_score)) {
+    if (audit) console.error(`  No valid opportunity score for ${lead.business_name}`);
+    await markFailed();
+    return;
+  }
+
+  const { error: updateError } = await supabase
+    .from("leads")
+    .update({
+      audit: {
+        ...audit,
+        measured_issues: page.measured.issues,
+        checks: page.measured.checks,
+      },
+      opportunity_score: audit.opportunity_score,
+      audit_status: "done",
+    })
+    .eq("id", lead.id);
+
+  if (updateError) {
+    console.error("Update error:", updateError.message);
+  } else {
+    console.log(
+      `Done: ${lead.business_name} | Score: ${audit.opportunity_score}/10`,
+    );
+  }
+
+  // Small delay to avoid rate limiting
+  await new Promise((r) => setTimeout(r, 4000));
 }
 
 runAnalyzer();
