@@ -51,16 +51,31 @@ function measureHtml($, finalUrl, bodyText) {
 async function fetchWebsiteHTML(url) {
   try {
     // Clean UTM params from URL
-    const cleanUrl = url.split("?")[0];
+    let cleanUrl = url.split("?")[0];
     console.log(`  Fetching HTML from: ${cleanUrl}`);
 
-    const response = await fetch(cleanUrl, {
-      signal: AbortSignal.timeout(8000),
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
+    // Complete browser headers: firewalls reject the bare "AppleWebKit"
+    // user agent this used to send, while the same page loads for a browser
+    const get = (u) =>
+      fetch(u, {
+        signal: AbortSignal.timeout(8000),
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+          Accept: "text/html,application/xhtml+xml",
+          "Accept-Language": "en-GB,en;q=0.9",
+        },
+      });
+
+    let response = await get(cleanUrl);
+
+    // Listings often link an old page that's gone; audit the home page instead
+    const home = `${new URL(cleanUrl).origin}/`;
+    if (!response.ok && cleanUrl !== home) {
+      console.log(`  HTTP ${response.status} for ${cleanUrl}, trying the home page`);
+      cleanUrl = home;
+      response = await get(home);
+    }
 
     if (!response.ok) {
       console.log(`  HTTP ${response.status} for ${cleanUrl}`);
