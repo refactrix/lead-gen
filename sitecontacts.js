@@ -24,6 +24,8 @@ const PREFERRED_LOCAL_PARTS = new Set([
   "office", "team", "bookings", "reservations", "mail",
 ]);
 const SKIP_LOCAL_PARTS = /^(no-?reply|do-?not-?reply|postmaster|abuse|webmaster|privacy|gdpr|dpo|unsubscribe)$/i;
+// Hiring inboxes: a pitch there reaches whoever handles recruitment
+const JOB_LOCAL_PARTS = /jobs?|careers?|recruit|vacanc|hiring|^hr$/i;
 const PLACEHOLDER_DOMAINS = /(^|\.)(example\.(com|org|net)|domain\.com|yourdomain\.|email\.com|sentry\.io|wixpress\.com)$/i;
 const FILE_LIKE = /\.(png|jpe?g|gif|webp|svg|ico|css|js)$/i;
 
@@ -182,7 +184,8 @@ function cleanCandidates(raw, website) {
     const email = String(r).trim().replace(/^[.\-_]+|[.\-_]+$/g, "").toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,24}$/.test(email)) continue;
     const [local, domain] = email.split("@");
-    if (SKIP_LOCAL_PARTS.test(local) || PLACEHOLDER_DOMAINS.test(domain) || FILE_LIKE.test(email)) continue;
+    if (SKIP_LOCAL_PARTS.test(local) || JOB_LOCAL_PARTS.test(local)) continue;
+    if (PLACEHOLDER_DOMAINS.test(domain) || FILE_LIKE.test(email)) continue;
     if (/^\d+$/.test(local) || local.length > 40) continue;
     if (!emailMatchesSite(email, website)) continue;
     const score = (PREFERRED_LOCAL_PARTS.has(local) ? 3 : 1) + (hostOf(domain) === hostOf(website) ? 2 : 0);
