@@ -248,6 +248,17 @@ async function sendApproved() {
         process.exitCode = 1;
       }
 
+      // The lead moves to Contacted, unless someone already set it to
+      // something else (e.g. Interested), which is kept
+      const { error: leadStatusError } = await supabase
+        .from("leads")
+        .update({ status: "contacted" })
+        .eq("id", lead.id)
+        .eq("status", "new");
+      if (leadStatusError) {
+        console.warn(`  Lead status not changed to contacted (email was sent): ${leadStatusError.message}`);
+      }
+
       try {
         await copyToSent(rawMessage);
       } catch (err) {
