@@ -40,6 +40,51 @@ const NOT_OWN_SITE = [
   "ubereats.com", "deliveroo.co.uk", "just-eat.co.uk", "opentable.com", "opentable.co.uk",
 ];
 export const isOwnSite = (domain) => !NOT_OWN_SITE.some((d) => domain === d || domain.endsWith("." + d));
+/**
+ * Whether a URL is still on the site's own domain (or a subdomain either
+ * way). Domains lapse and get bought: a restaurant's address can end up
+ * redirecting to a betting site, which must not be audited or emailed.
+ */
+export function sameSite(url, site) {
+  const a = hostOf(url);
+  const b = hostOf(site);
+  if (!a || !b) return false;
+  return a === b || a.endsWith("." + b) || b.endsWith("." + a);
+}
+
+// Words too common in business names to show a page is about this business
+const GENERIC_NAME_WORDS = new Set([
+  "the", "and", "of", "ltd", "limited", "co", "uk", "london", "restaurant", "restaurants",
+  "cafe", "café", "bar", "salon", "hair", "beauty", "clinic", "dental", "gym", "studio",
+  "plumbing", "heating", "services", "service", "shop", "store", "kitchen", "group",
+]);
+
+const normalize = (s) =>
+  String(s)
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+/**
+ * Whether a page is about this business: its name, or every distinctive word
+ * of it, appears in the page's title or text. Used when a website redirects to
+ * another domain, to tell a rebrand from a domain that now belongs to someone
+ * else.
+ */
+export function pageMentionsName(html, name) {
+  if (!html || !name) return false;
+  const $ = cheerio.load(html);
+  $("script, style, noscript").remove();
+  const text = ` ${normalize(`${$("title").text()} ${$("body").text()}`)} `;
+  const full = normalize(name.split("|")[0]);
+  if (full && text.includes(` ${full} `)) return true;
+  const words = full.split(" ").filter((w) => w.length >= 3 && !GENERIC_NAME_WORDS.has(w));
+  return words.length > 0 && words.every((w) => text.includes(` ${w} `));
+}
+
 /** Same rule emailgen.js applies before drafting. */
 export function emailMatchesSite(email, site) {
   const e = hostOf(email.split("@")[1]);
@@ -126,8 +171,8 @@ async function fetchHtml(url) {
     redirect: "follow",
     signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
   });
-  if (!res.ok) return { status: res.status };
-  if (!(res.headers.get("content-type") || "").includes("html")) return { status: res.status };
+  if (!res.ok) return { status: res.status, url: res.url };
+  if (!(res.headers.get("content-type") || "").includes("html")) return { status: res.status, url: res.url };
   const html = (await res.text()).slice(0, MAX_HTML_BYTES);
   return { status: res.status, url: res.url, html };
 }
@@ -196,25 +241,36 @@ function cleanCandidates(raw, website) {
 
 /**
  * Looks for the business's own address (same domain as its website).
- * `known` holds addresses already listed for the place (e.g. its OSM tags).
- * Returns { emails, outcome } where outcome is found | no_email | blocked | unreachable.
+ * `known` holds addresses already listed for the place (e.g. its OSM tags);
+ * `name` is the business name, used to check a site that redirects elsewhere.
+ * Returns { emails, outcome, website } where outcome is
+ * found | no_email | blocked | unreachable | moved, and website is the site's
+ * current address when it has moved to a new domain (a rebrand).
  */
-export async function findSiteEmails(website, known = []) {
-  const fromTags = cleanCandidates(known, website);
-  if (fromTags.length) return { emails: fromTags, outcome: "found" };
-
+export async function findSiteEmails(website, known = [], name = "") {
+  let fromTags = cleanCandidates(known, website);
+  let movedTo = null;
   const start = new URL(website);
   const allowed = await loadRobots(start.origin);
 
   // Map listings often point at an old deep link; fall back to the home page
   const entries = [...new Set([start.href, `${start.origin}/`])].filter((u) => allowed(new URL(u).pathname));
-  if (!entries.length) return { emails: [], outcome: "blocked" };
+  if (!entries.length) {
+    // robots.txt keeps us off the site, so a listed address is all there is
+    return fromTags.length ? { emails: fromTags, outcome: "found" } : { emails: [], outcome: "blocked" };
+  }
 
   let home = null;
   let lastStatus = 0;
   for (const url of entries) {
     try {
       const page = await fetchHtml(url);
+      if (page.url && !sameSite(page.url, website)) {
+        // A rebrand keeps the business's name; a lapsed domain doesn't
+        if (!page.html || !pageMentionsName(page.html, name)) return { emails: [], outcome: "moved" };
+        website = movedTo = `${new URL(page.url).origin}/`;
+        fromTags = cleanCandidates(known, website);
+      }
       if (page.html) {
         home = page;
         break;
@@ -224,6 +280,8 @@ export async function findSiteEmails(website, known = []) {
       // Network or TLS error: try the next entry
     }
   }
+  // A site that blocks bots can still have a listed address worth using
+  if (fromTags.length) return { emails: fromTags, outcome: "found", ...(movedTo && { website: movedTo }) };
   if (!home) return { emails: [], outcome: lastStatus === 403 || lastStatus === 429 ? "blocked" : "unreachable" };
 
   const raw = [];
@@ -232,7 +290,7 @@ export async function findSiteEmails(website, known = []) {
   raw.push(...emailsInPage($home));
 
   let found = cleanCandidates(raw, website);
-  if (found.length) return { emails: found, outcome: "found" };
+  if (found.length) return { emails: found, outcome: "found", ...(movedTo && { website: movedTo }) };
 
   const origin = new URL(home.url).origin;
   const queue = links.length ? links : FALLBACK_PATHS.map((p) => origin + p);
@@ -246,7 +304,7 @@ export async function findSiteEmails(website, known = []) {
       continue;
     }
     found = cleanCandidates(raw, website);
-    if (found.length) return { emails: found, outcome: "found" };
+    if (found.length) return { emails: found, outcome: "found", ...(movedTo && { website: movedTo }) };
   }
   return { emails: [], outcome: "no_email" };
 }

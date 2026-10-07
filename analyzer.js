@@ -4,6 +4,7 @@ import * as cheerio from "cheerio";
 import dotenv from "dotenv";
 dotenv.config();
 import Groq from "groq-sdk";
+import { pageMentionsName, sameSite } from "./sitecontacts.js";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -48,7 +49,7 @@ function measureHtml($, finalUrl, bodyText) {
   return { checks, issues };
 }
 
-async function fetchWebsiteHTML(url) {
+async function fetchWebsiteHTML(url, businessName) {
   try {
     // Clean UTM params from URL
     let cleanUrl = url.split("?")[0];
@@ -77,12 +78,25 @@ async function fetchWebsiteHTML(url) {
       response = await get(home);
     }
 
+    const movedTo = response.url && !sameSite(response.url, url) ? new URL(response.url).hostname : null;
+
     if (!response.ok) {
-      console.log(`  HTTP ${response.status} for ${cleanUrl}`);
-      return null;
+      console.log(`  HTTP ${response.status} for ${response.url || cleanUrl}`);
+      // A redirect to another domain that then refuses us isn't the business
+      return movedTo ? { moved: response.url } : null;
     }
 
     const html = await response.text();
+
+    // Another domain: a rebrand still names the business; a lapsed domain
+    // bought by someone else doesn't, and must not be audited or emailed
+    if (movedTo) {
+      if (!pageMentionsName(html, businessName)) {
+        console.log(`  Website now redirects to ${movedTo}, which doesn't mention the business`);
+        return { moved: response.url };
+      }
+      console.log(`  Website moved to ${movedTo} (same business)`);
+    }
     console.log(`  Fetched ${html.length} chars`);
     const $ = cheerio.load(html);
 
@@ -222,10 +236,19 @@ async function analyzeLead(lead) {
       })
       .eq("id", lead.id);
 
-  const page = await fetchWebsiteHTML(lead.website);
+  const page = await fetchWebsiteHTML(lead.website, lead.business_name);
 
   if (!page) {
     await markFailed();
+    return;
+  }
+
+  // Not the business's site any more: never audit or draft it, no retries
+  if (page.moved) {
+    await supabase
+      .from("leads")
+      .update({ audit_status: "failed", audit_attempts: MAX_ATTEMPTS })
+      .eq("id", lead.id);
     return;
   }
 

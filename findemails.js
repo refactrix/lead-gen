@@ -2,7 +2,7 @@ import "./redact-logs.js";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 dotenv.config();
-import { findSiteEmails } from "./sitecontacts.js";
+import { findSiteEmails, hostOf } from "./sitecontacts.js";
 
 // One-off: looks again for an email on the websites of leads saved without
 // one (the old Google Maps scraper saved those too). Uses the same finder as
@@ -22,7 +22,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 async function main() {
   const { data: leads, error } = await supabase
     .from("leads")
-    .select("id, business_name, website")
+    .select("id, business_name, website, domain")
     .is("email", null)
     .not("website", "is", null)
     .neq("status", "archived")
@@ -38,7 +38,8 @@ async function main() {
   async function worker() {
     while (queue.length) {
       const lead = queue.shift();
-      const { emails, outcome } = await findSiteEmails(lead.website).catch(() => ({ emails: [], outcome: "unreachable" }));
+      const result = await findSiteEmails(lead.website, [], lead.business_name).catch(() => ({ emails: [], outcome: "unreachable" }));
+      const { emails, outcome } = result;
       if (outcome !== "found") {
         notFound.push(`${lead.business_name} (${outcome.replace("_", " ")})`);
         continue;
@@ -52,7 +53,8 @@ async function main() {
       if (!DRY_RUN) {
         const { error: updateError } = await supabase
           .from("leads")
-          .update({ email: emails[0], emails })
+          // After a rebrand the email is on the new domain, so the website follows
+          .update({ email: emails[0], emails, ...(result.website && { website: result.website, domain: hostOf(result.website) }) })
           .eq("id", lead.id)
           .is("email", null);
         if (updateError) throw new Error(`Saving ${lead.business_name} failed: ${updateError.message}`);

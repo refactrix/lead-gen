@@ -256,10 +256,20 @@ async function searchArea(target, knownDomains, quota) {
       return;
     }
     checked++;
-    const { emails, outcome } = await findSiteEmails(place.website, place.emails).catch(() => ({
+    const result = await findSiteEmails(place.website, place.emails, place.name).catch(() => ({
       emails: [],
       outcome: "unreachable",
     }));
+    const { emails, outcome } = result;
+    // The site moved to a new domain (a rebrand): save the current one
+    if (result.website) {
+      place.website = result.website;
+      place.domain = hostOf(result.website);
+      if (knownDomains.has(place.domain)) {
+        await markSeen(place.sourceId, "duplicate");
+        return;
+      }
+    }
     if (outcome !== "found") {
       console.log(`  – ${place.name}: ${outcome.replace("_", " ")}`);
       await markSeen(place.sourceId, outcome);

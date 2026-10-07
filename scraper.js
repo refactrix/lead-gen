@@ -174,13 +174,13 @@ async function main() {
       for (const place of fresh) {
         if (found >= MAX_NEW_LEADS) break;
         checked++;
-        const { website, phone } = await readPlace(page, place.href).catch(() => ({ website: null, phone: null }));
+        let { website, phone } = await readPlace(page, place.href).catch(() => ({ website: null, phone: null }));
         if (!website) {
           console.log(`  – ${place.name}: no website`);
           await markSeen(place.id, "no_website");
           continue;
         }
-        const domain = hostOf(website);
+        let domain = hostOf(website);
         if (!isOwnSite(domain)) {
           console.log(`  – ${place.name}: website is a social or booking page`);
           await markSeen(place.id, "no_website");
@@ -191,7 +191,17 @@ async function main() {
           continue;
         }
 
-        const { emails, outcome } = await findSiteEmails(website).catch(() => ({ emails: [], outcome: "unreachable" }));
+        const result = await findSiteEmails(website, [], place.name).catch(() => ({ emails: [], outcome: "unreachable" }));
+        const { emails, outcome } = result;
+        // The site moved to a new domain (a rebrand): save the current one
+        if (result.website) {
+          website = result.website;
+          domain = hostOf(website);
+          if (knownDomains.has(domain)) {
+            await markSeen(place.id, "duplicate");
+            continue;
+          }
+        }
         if (outcome !== "found") {
           console.log(`  – ${place.name}: ${outcome.replace("_", " ")}`);
           await markSeen(place.id, outcome);
