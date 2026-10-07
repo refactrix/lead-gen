@@ -38,6 +38,7 @@ const NOT_OWN_SITE = [
   "linkedin.com", "linktr.ee", "wa.me", "google.com", "business.site", "yell.com",
   "tripadvisor.com", "tripadvisor.co.uk", "booksy.com", "fresha.com", "treatwell.co.uk",
   "ubereats.com", "deliveroo.co.uk", "just-eat.co.uk", "opentable.com", "opentable.co.uk",
+  "mymenuweb.com",
 ];
 export const isOwnSite = (domain) => !NOT_OWN_SITE.some((d) => domain === d || domain.endsWith("." + d));
 /**
